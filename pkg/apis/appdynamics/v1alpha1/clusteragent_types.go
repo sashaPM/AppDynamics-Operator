@@ -8,25 +8,25 @@ import (
 // ClusterAgentSpec defines the desired state of ClusterAgent
 type ClusterAgentSpec struct {
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
-	ControllerUrl     string `json: "controllerUrl"`
-	AccountName       string `json: "accountName"`
-	GlobalAccountName string `json: "globalAccountName"`
-	//reference to the secret with credentials
-	//controller-key
-	//events-api-key
-	//rest-user
-	SecretName string                      `json: "secretName"`
-	Image      string                      `json:"image,omitempty"`
-	Args       []string                    `json:"args,omitempty"`
-	Env        []corev1.EnvVar             `json:"env,omitempty"`
-	Resources  corev1.ResourceRequirements `json:"resources,omitempty"`
+	ControllerUrl     string                      `json: "controllerUrl"`
+	AccountName       string                      `json: "accountName"`
+	GlobalAccountName string                      `json: "globalAccountName"`
+	SecretName        string                      `json: "secretName,omitempty"`
+	Image             string                      `json: "image,omitempty"`
+	Args              []string                    `json: "args,omitempty"`
+	Env               []corev1.EnvVar             `json: "env,omitempty"`
+	Resources         corev1.ResourceRequirements `json: "resources,omitempty"`
+	DashboardTiers    []string                    `json: "dashboardTiers,omitempty"`
+	IncludeNS         []string                    `json: "includeNs,omitempty"`
+	ExcludeNS         []string                    `json: "excludeNs,omitempty"`
+	IncludeNodes      []string                    `json: "includeNodes,omitempty"`
+	ExcludeNodes      []string                    `json: "excludeNodes,omitempty"`
 }
 
 // ClusterAgentStatus defines the observed state of ClusterAgent
 type ClusterAgentStatus struct {
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
-	LastMetricsUpdateTime metav1.Time `json:"lastMetricsUpdateTime"`
-	LastChangePushTime    metav1.Time `json:"lastChangePushTime"`
+	LastUpdateTime metav1.Time `json: "lastMetricsUpdateTime"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

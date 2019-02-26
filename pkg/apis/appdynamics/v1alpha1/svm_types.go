@@ -5,24 +5,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // SVMSpec defines the desired state of SVM
 type SVMSpec struct {
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
-	ControllerUrl     string `json: "controllerUrl"`
-	AccountName       string `json: "accountName"`
-	GlobalAccountName string `json: "globalAccountName"`
-	//reference to the secret with credentials
-	//appd-key
-	SecretName   string                      `json: "secretName"`
-	Image        string                      `json:"image,omitempty"`
-	Args         []string                    `json:"args,omitempty"`
-	Env          []corev1.EnvVar             `json:"env,omitempty"`
-	Resources    corev1.ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string           `json:"nodeSelector,omitempty"`
-	Tolerations  []corev1.Toleration         `json:"tolerations,omitempty"`
+	ControllerUrl     string                      `json: "controllerUrl"`
+	AccountName       string                      `json: "accountName"`
+	GlobalAccountName string                      `json: "globalAccountName"`
+	IncludeBiq        bool                        `json: "includeBiq,omitempty"`
+	Debug             bool                        `json: "debug,omitempty"`
+	SecretName        string                      `json: "secretName"`
+	Image             string                      `json: "image,omitempty"`
+	Args              []string                    `json: "args,omitempty"`
+	Env               []corev1.EnvVar             `json: "env,omitempty"`
+	Resources         corev1.ResourceRequirements `json: "resources,omitempty"`
+	NodeSelector      map[string]string           `json: "nodeSelector,omitempty"`
+	Tolerations       []corev1.Toleration         `json: "tolerations,omitempty"`
 }
 
 // SVMStatus defines the observed state of SVM

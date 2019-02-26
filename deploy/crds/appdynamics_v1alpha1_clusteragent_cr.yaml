@@ -1,7 +1,10 @@
 apiVersion: appdynamics.com/v1alpha1
 kind: ClusterAgent
 metadata:
-  name: example-clusteragent
+  name: local-k8s
 spec:
-  # Add fields here
-  size: 3
+  ControllerUrl: "http://455controllernossh-k8sbiqtest-eq2w7bwd.srv.ravcloud.com:8090"
+  AccountName: "customer1"
+  GlobalAccountName: "customer1_d20707aa-0363-4477-9d9e-106d5f19f046"
+  Image: "sashaz/java-service:v2"
+  DashboardTiers: ["client-api"]

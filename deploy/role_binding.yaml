@@ -1,11 +1,13 @@
-kind: RoleBinding
+kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: appdynamics-operator
 subjects:
 - kind: ServiceAccount
   name: appdynamics-operator
+  # Replace this with the namespace the operator is deployed in.
+  namespace: appd-infra
 roleRef:
-  kind: Role
+  kind: ClusterRole
   name: appdynamics-operator
   apiGroup: rbac.authorization.k8s.io
