@@ -1,0 +1,7 @@
+apiVersion: appdynamics.com/v1alpha1
+kind: SVM
+metadata:
+  name: example-svm
+spec:
+  # Add fields here
+  size: 3
