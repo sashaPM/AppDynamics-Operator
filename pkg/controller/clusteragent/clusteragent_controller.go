@@ -1,11 +1,11 @@
 package clusteragent
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
 	"encoding/json"
+	"time"
 
 	"strconv"
 	"strings"
@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	//	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -109,19 +109,20 @@ func (r *ReconcileClusterAgent) Reconcile(request reconcile.Request) (reconcile.
 		reqLogger.Error(err, "Failed to get Cluster Agent")
 		return reconcile.Result{}, err
 	}
-
+	reqLogger.Info("Cluster agent spec exists. Checking the corresponding deployment...")
 	// Check if the agent already exists in the namespace
 	existingDeployment := &appsv1.Deployment{}
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: clusterAgent.Name, Namespace: clusterAgent.Namespace}, existingDeployment)
 	if err != nil && errors.IsNotFound(err) {
-		reqLogger.Info("Ensuring secret")
-		_, esecret := r.ensureSecret(clusterAgent)
+		reqLogger.Info("Cluster agent deployment does not exist. Creating...")
+		reqLogger.Info("Checking the secret")
+		_, esecret := r.ensureSecret(clusterAgent, true)
 		if esecret != nil {
 			reqLogger.Error(esecret, "Failed to create new Cluster Agent due to secret", "Deployment.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
 			return reconcile.Result{}, esecret
 		}
-		reqLogger.Info("Ensuring config map")
-		_, _, econfig := r.ensureConfigMap(clusterAgent)
+		reqLogger.Info("Checking the config map")
+		_, _, econfig := r.ensureConfigMap(clusterAgent, true)
 		if econfig != nil {
 			reqLogger.Error(econfig, "Failed to create new Cluster Agent due to config map", "Deployment.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
 			return reconcile.Result{}, econfig
@@ -148,15 +149,38 @@ func (r *ReconcileClusterAgent) Reconcile(request reconcile.Request) (reconcile.
 		return reconcile.Result{}, err
 	}
 
+	reqLogger.Info("Cluster agent deployment exists. Checking for deltas with the current state...")
 	// Ensure the deployment spec matches the new spec
 	// Differentiate between breaking changes and benign updates
+	//check if secret has been recreated. if yes, restart pod
+	restart, errsecret := r.ensureSecret(clusterAgent, false)
+	if errsecret != nil {
+		reqLogger.Error(errsecret, "Failed to get cluster agent config secret", "Deployment.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
+		return reconcile.Result{}, errsecret
+	}
+	if restart {
+		fmt.Println("Breaking changes detected in the secret. Restarting the cluster agent pod...")
+		errRestart := r.restartAgent(clusterAgent)
+		if errRestart != nil {
+			reqLogger.Error(errRestart, "Failed to restart cluster agent", "Deployment.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
+			return reconcile.Result{}, errRestart
+		}
+	}
+
 	reqLogger.Info("Retrieving the agent config map")
-	cm, bag, econfig := r.ensureConfigMap(clusterAgent)
+	cm, bag, econfig := r.ensureConfigMap(clusterAgent, false)
 	if econfig != nil {
 		reqLogger.Error(econfig, "Failed to obtain cluster agent config map", "Deployment.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
 		return reconcile.Result{}, econfig
 	}
 	breaking, benign := r.hasBreakingChanges(clusterAgent, bag)
+	if breaking || benign {
+		//update the configMap
+		errMap := r.updateMap(cm, clusterAgent, false)
+		if errMap != nil {
+			return reconcile.Result{}, errMap
+		}
+	}
 	if breaking {
 		fmt.Println("Breaking changes detected. Restarting the cluster agent pod...")
 		errRestart := r.restartAgent(clusterAgent)
@@ -165,16 +189,16 @@ func (r *ReconcileClusterAgent) Reconcile(request reconcile.Request) (reconcile.
 			return reconcile.Result{}, errRestart
 		}
 	} else if benign {
-		fmt.Println("Benign changes detected. Updating config map...")
-		errMap := r.updateMap(cm, clusterAgent)
-		if errMap != nil {
-			return reconcile.Result{}, errMap
-		}
+		reqLogger.Info("Benign changes detected. Updating config map...")
+	} else {
+		reqLogger.Info("No changes detected...")
+	}
+	if breaking || benign {
 		r.updateStatus(clusterAgent)
 	}
 
 	reqLogger.Info("Exiting reconciliation loop.")
-	return reconcile.Result{}, nil
+	return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 func (r *ReconcileClusterAgent) updateStatus(clusterAgent *appdynamicsv1alpha1.ClusterAgent) error {
@@ -203,14 +227,45 @@ func (r *ReconcileClusterAgent) hasBreakingChanges(clusterAgent *appdynamicsv1al
 	return breaking, benign
 }
 
-func (r *ReconcileClusterAgent) ensureSecret(clusterAgent *appdynamicsv1alpha1.ClusterAgent) (*corev1.Secret, error) {
+func (r *ReconcileClusterAgent) ensureSecret(clusterAgent *appdynamicsv1alpha1.ClusterAgent, create bool) (bool, error) {
 	secret := &corev1.Secret{}
+	requiredUpdate := false
 	key := client.ObjectKey{Namespace: clusterAgent.Namespace, Name: "cluster-agent-secret"}
 	err := r.client.Get(context.TODO(), key, secret)
 	if err != nil {
-		return nil, fmt.Errorf("Unable to get secret for cluster-agent. %v", err)
+		return requiredUpdate, fmt.Errorf("Unable to get secret for cluster-agent. %v", err)
 	}
-	return secret, nil
+	if create {
+		//annotate
+		err = r.annotateSecret(secret, clusterAgent)
+		if err != nil {
+			return requiredUpdate, err
+		}
+	} else {
+		//check if annotation exists.
+		//if it is not, update and return false to trigger restart
+		if secret.Annotations["appd-cluster-agent"] != "true" {
+			requiredUpdate = true
+			err = r.annotateSecret(secret, clusterAgent)
+			if err != nil {
+				return requiredUpdate, err
+			}
+		}
+
+	}
+	return requiredUpdate, nil
+}
+
+func (r *ReconcileClusterAgent) annotateSecret(secret *corev1.Secret, clusterAgent *appdynamicsv1alpha1.ClusterAgent) error {
+	if secret.Annotations == nil {
+		secret.Annotations = make(map[string]string)
+	}
+	secret.Annotations["appd-cluster-agent"] = "true"
+	err := r.client.Update(context.TODO(), secret)
+	if err != nil {
+		return fmt.Errorf("Unable to annotate secret for cluster-agent. %v", err)
+	}
+	return nil
 }
 
 func (r *ReconcileClusterAgent) ensureAgentService(clusterAgent *appdynamicsv1alpha1.ClusterAgent) (*corev1.Service, error) {
@@ -252,7 +307,7 @@ func (r *ReconcileClusterAgent) ensureAgentService(clusterAgent *appdynamicsv1al
 	return svc, nil
 }
 
-func (r *ReconcileClusterAgent) ensureConfigMap(clusterAgent *appdynamicsv1alpha1.ClusterAgent) (*corev1.ConfigMap, *AppDBag, error) {
+func (r *ReconcileClusterAgent) ensureConfigMap(clusterAgent *appdynamicsv1alpha1.ClusterAgent, create bool) (*corev1.ConfigMap, *AppDBag, error) {
 	cm := &corev1.ConfigMap{}
 	var bag AppDBag
 	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "cluster-agent-config", Namespace: clusterAgent.Namespace}, cm)
@@ -264,7 +319,7 @@ func (r *ReconcileClusterAgent) ensureConfigMap(clusterAgent *appdynamicsv1alpha
 		//configMap does not exist. Create
 		cm.Name = "cluster-agent-config"
 		cm.Namespace = clusterAgent.Namespace
-		errMap := r.updateMap(cm, clusterAgent)
+		errMap := r.updateMap(cm, clusterAgent, create)
 		if errMap != nil {
 			return nil, nil, errMap
 		}
@@ -282,8 +337,8 @@ func (r *ReconcileClusterAgent) ensureConfigMap(clusterAgent *appdynamicsv1alpha
 
 }
 
-func (r *ReconcileClusterAgent) updateMap(cm *corev1.ConfigMap, clusterAgent *appdynamicsv1alpha1.ClusterAgent) error {
-	bag := AppDBag{}
+func (r *ReconcileClusterAgent) updateMap(cm *corev1.ConfigMap, clusterAgent *appdynamicsv1alpha1.ClusterAgent, create bool) error {
+	bag := getDefaultProperties()
 	bag.Account = clusterAgent.Spec.AccountName
 	bag.GlobalAccount = clusterAgent.Spec.GlobalAccountName
 	arr := strings.Split(clusterAgent.Spec.ControllerUrl, ":")
@@ -299,7 +354,8 @@ func (r *ReconcileClusterAgent) updateMap(cm *corev1.ConfigMap, clusterAgent *ap
 	bag.ControllerUrl = controllerUrl
 	bag.ControllerPort = uint16(port)
 	bag.SSLEnabled = strings.Contains(protocol, "s")
-	bag.DeploysToDashboard = clusterAgent.Spec.DashboardTiers
+	bag.DeploysToDashboard = make([]string, len(clusterAgent.Spec.DashboardTiers))
+	copy(bag.DeploysToDashboard, clusterAgent.Spec.DashboardTiers)
 
 	data, errJson := json.Marshal(bag)
 	if errJson != nil {
@@ -307,8 +363,15 @@ func (r *ReconcileClusterAgent) updateMap(cm *corev1.ConfigMap, clusterAgent *ap
 	}
 	cm.Data = make(map[string]string)
 	cm.Data["cluster-agent-config.json"] = string(data)
-	e := r.client.Create(context.TODO(), cm)
-	fmt.Printf("Configmap created. Error = %v\n", e)
+	var e error
+	if create {
+		e = r.client.Create(context.TODO(), cm)
+		fmt.Printf("Configmap created. Error = %v\n", e)
+	} else {
+		e = r.client.Update(context.TODO(), cm)
+		fmt.Printf("Configmap updated. Error = %v\n", e)
+	}
+
 	if e != nil {
 		return fmt.Errorf("Failed to save configMap cluster-agent-config. %v", e)
 	}
@@ -380,8 +443,7 @@ func (r *ReconcileClusterAgent) newAgentDeployment(clusterAgent *appdynamicsv1al
 						}},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "agent-config",
-							MountPath: "/opt/appdynamics/config/cluster-agent-config.json",
-							SubPath:   "cluster-agent-config.json",
+							MountPath: "/opt/appdynamics/config/",
 						}},
 					}},
 					Volumes: []corev1.Volume{{
@@ -404,14 +466,19 @@ func (r *ReconcileClusterAgent) newAgentDeployment(clusterAgent *appdynamicsv1al
 }
 
 func (r *ReconcileClusterAgent) restartAgent(clusterAgent *appdynamicsv1alpha1.ClusterAgent) error {
-	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: clusterAgent.Namespace, Name: clusterAgent.Name}
-	err := r.client.Get(context.TODO(), key, pod)
-	if err != nil {
-		return fmt.Errorf("Unable to get cluster-agent pod. %v", err)
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labelsForClusterAgent(clusterAgent))
+	listOps := &client.ListOptions{
+		Namespace:     clusterAgent.Namespace,
+		LabelSelector: labelSelector,
 	}
+	err := r.client.List(context.TODO(), listOps, podList)
+	if err != nil || len(podList.Items) < 1 {
+		return fmt.Errorf("Unable to retrieve cluster-agent pod. %v", err)
+	}
+	pod := podList.Items[0]
 	//delete to force restart
-	err = r.client.Delete(context.TODO(), pod)
+	err = r.client.Delete(context.TODO(), &pod)
 	if err != nil {
 		return fmt.Errorf("Unable to delete cluster-agent pod. %v", err)
 	}
@@ -420,63 +487,4 @@ func (r *ReconcileClusterAgent) restartAgent(clusterAgent *appdynamicsv1alpha1.C
 
 func labelsForClusterAgent(clusterAgent *appdynamicsv1alpha1.ClusterAgent) map[string]string {
 	return map[string]string{"app": "clusterAgent", "clusterAgent_cr": clusterAgent.Name}
-}
-
-func getConfigMap(data string, clusterAgent *appdynamicsv1alpha1.ClusterAgent) string {
-	buf := bytes.NewBufferString(data)
-	buf.WriteString(
-		`Account: ""
-	GlobalAccount: ""
-	ControllerUrl:
-	ControllerPort:
-	EventServiceUrl:
-	SSLEnabled:
-    AppName: "K8s-Cluster-Agent"
-	TierName: "ClusterAgent"
-	NodeName: "Node1"
-	SystemSSLCert: "/opt/appd/ssl/system.crt"
-	AgentSSLCert: "/opt/appd/ssl/agent.crt"
-	EventAPILimit: 100
-	PodSchemaName: "schema-pods"
-	NodeSchemaName: "schema-nodes"
-	EventSchemaName: "schema-events"
-	ContainerSchemaName: "schema-containers"
-	JobSchemaName: "schema-jobs"
-	LogSchemaName: "schema-logs"
-	DashboardTemplatePath: "/usr/local/go/src/github.com/sjeltuhin/clusterAgent/templates/k8s_dashboard_template.json"
-	DashboardSuffix: "SUMMARY"
-	JavaAgentVersion: "latest"
-	AgentLabel: "appd-agent"
-	AppDAppLabel: "appd-app"
-	AppDTierLabel: "appd-tier"
-	AppDAnalyticsLabel: "appd-biq"
-	AgentMountName: "appd-agent-repo"
-	AgentMountPath: "/opt/appd"
-	AppLogMountName: "appd-volume"
-	AppLogMountPath: "/opt/appdlogs"
-	JDKMountName: "jdk-repo"
-	JDKMountPath: "$JAVA_HOME/lib"
-	NodeNamePrefix: ""
-	AnalyticsAgentUrl: "http://analytics-proxy:9090"
-	AnalyticsAgentContainerName: "appd-analytics-agent"
-	AppDInitContainerName" appd-agent-attach"
-	AnalyticsAgentImage: "sashaz/analytics-agent@sha256:ff776bdf3beed9f4bdf638d16b5a688d9e1c0fc124ce1282bef1851c122397e4"
-	AppDJavaAttachImage: "sashaz/java-agent-attach@sha256:b93f2018b091f4abfd2533e6c194c9e6ecf00fcae861c732f1b771dad1b26a80"
-	AppDDotNetAttachImage: "sashaz/dotnet-agent-attach@sha256:3f5d921eadfa227ffe072caa41e01c3c1fc882c5617ad45d808ffedaa20593a6"
-	AppDNodeJSAttachImage: "latest"
-	ProxyInfo: ""
-	ProxyUser: ""
-	ProxyPass: ""
-	InstrumentationMethod: "mount"
-	InitContainerDir: "/opt/temp."
-	MetricsSyncInterval: 60
-	SnapshotSyncInterval: 15
-	AgentServerPort: 8989
-	IncludeNsToInstrument: []
-	ExcludeNsToInstrument: []
-	DeploysToDashboard: ["client-api"]
-	IncludeNodesToInstrument: []
-	ExcludeNodesToInstrument: []`)
-
-	return buf.String()
 }
